@@ -152,7 +152,6 @@ func (self *Repository) LoadYaml(data string, options services.ArtifactOptions) 
 	if err != nil {
 		return nil, err
 	}
-
 	return artifact, self.saveArtifact(self.ctx, artifact)
 }
 
@@ -185,7 +184,7 @@ func (self *Repository) Get(
 	if err == nil {
 		artifact, ok := artifact_any.(*artifacts_proto.Artifact)
 		if ok {
-			return artifact, true
+			return self.ensureCompiled(config_obj, artifact)
 		}
 	}
 
@@ -194,7 +193,7 @@ func (self *Repository) Get(
 	if self.parent != nil {
 		artifact, pres := self.parent.Get(ctx, self.parent_config_obj, name)
 		if pres {
-			return artifact, true
+			return self.ensureCompiled(config_obj, artifact)
 		}
 	}
 
@@ -202,12 +201,47 @@ func (self *Repository) Get(
 	return self.getFromBackend(config_obj, name)
 }
 
+// Make sure the artifact is compiled.
+func (self *Repository) ensureCompiled(
+	config_obj *config_proto.Config,
+	artifact *artifacts_proto.Artifact) (*artifacts_proto.Artifact, bool) {
+
+	if artifact.Compiled {
+		return artifact, true
+	}
+
+	// Compile the artifact from the backend and return it.
+	dummy_repository := repository.Repository{
+		Data: make(map[string]*artifacts_proto.Artifact),
+	}
+
+	artifact, err := dummy_repository.LoadProto(
+		artifact, services.ArtifactOptions{
+			ArtifactIsBuiltIn:    artifact.BuiltIn,
+			ArtifactIsCompiledIn: artifact.CompiledIn,
+			ValidateArtifact:     false,
+		})
+	if err != nil {
+		return nil, false
+	}
+
+	compiled_artifact, pres := dummy_repository.Get(
+		self.ctx, self.config_obj, artifact.Name)
+	if !pres {
+		compiled_artifact = artifact
+	}
+
+	// Remember it for next time.
+	self.lru.Set(compiled_artifact.Name, compiled_artifact)
+
+	return compiled_artifact, true
+}
+
 func (self *Repository) getFromBackend(
 	config_obj *config_proto.Config, name string) (*artifacts_proto.Artifact, bool) {
 
 	// Nope - get it from the backend.
-	ctx := context.Background()
-	serialized, err := cvelo_services.GetElasticRecord(ctx,
+	serialized, err := cvelo_services.GetElasticRecord(self.ctx,
 		self.config_obj.OrgId, "repository", name)
 	if err != nil {
 		return nil, false
@@ -225,10 +259,7 @@ func (self *Repository) getFromBackend(
 		return nil, false
 	}
 
-	// Remember it for next time.
-	self.lru.Set(artifact.Name, artifact)
-
-	return artifact, true
+	return self.ensureCompiled(config_obj, artifact)
 }
 
 func (self *Repository) saveArtifact(
